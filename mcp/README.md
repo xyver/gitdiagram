@@ -48,11 +48,20 @@ Mermaid source is not a diagram until something renders it, so
 `render_diagram_html` writes one self-contained HTML file you open directly from
 disk. No server, no build step - the only external load is Mermaid from a CDN.
 
-The page has pan and zoom, a light/dark toggle, clickable nodes when links
-resolved, and a collapsible list of exactly which files the diagram was built
-from. That list travels with the picture on purpose: a diagram is only as good
-as the files behind it, and a missing edge usually means the caller was not
-among them.
+The diagram is the page: it fills the viewport as the background, and the
+title, controls and file list float over it. A wide graph gets the whole screen
+instead of a letterbox. Drag anywhere to pan, scroll to zoom at the cursor,
+Fit to re-frame, and click a node to open its file when links resolved.
+
+Dragging works on top of nodes too. Mermaid renders node labels as `<p>` inside
+`foreignObject`, so a drag handler that skips events landing on a node would
+refuse nearly every drag; a node click is distinguished by how far the pointer
+travelled instead.
+
+The collapsible panel lists exactly which files the diagram was built from.
+That list travels with the picture on purpose: a diagram is only as good as the
+files behind it, and a missing edge usually means the caller was not among
+them.
 
 Output lands in this project's `output/` folder as
 `<name>_<YYYY-MM-DD_HHMMSS>.html`, which is gitignored. Runs accumulate rather
