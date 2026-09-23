@@ -30,6 +30,33 @@ export function excerptSource(text: string, budget: number): string {
     importedNames.add(match[1]!);
     imports.push({ names: [match[1]!], source: match[2]! });
   }
+  // Python: `from pkg.mod import a, b` and `import pkg.mod as alias`. Without
+  // these a Python repository yields no imports at all, which zeroes the
+  // import budget and disables every call-site window below, leaving blind
+  // sampling to carry the architecture. Imports are the highest-signal region
+  // in the file, so they are worth parsing per language rather than assuming
+  // one syntax.
+  for (const match of text.matchAll(
+    /^[\t ]*from\s+([.\w]+)\s+import\s+\(?([^()\n]+?)\)?\s*$/gm,
+  )) {
+    const names: string[] = [];
+    for (const entry of match[2]!.split(",")) {
+      const name = entry.trim().split(/\s+as\s+/).at(-1);
+      if (name && /^[A-Za-z_]\w*$/.test(name)) {
+        importedNames.add(name);
+        names.push(name);
+      }
+    }
+    if (names.length) imports.push({ names, source: match[1]! });
+  }
+  for (const match of text.matchAll(
+    /^[\t ]*import\s+([.\w]+)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/gm,
+  )) {
+    const bound = match[2] ?? match[1]!.split(".").at(-1)!;
+    if (!/^[A-Za-z_]\w*$/.test(bound)) continue;
+    importedNames.add(bound);
+    imports.push({ names: [bound], source: match[1]! });
+  }
   const importBudget = imports.length
     ? Math.min(1000, Math.floor(budget / 4))
     : 0;

@@ -130,7 +130,7 @@ export function renderDiagramHtml(
     border-radius: 10px;
     background: var(--panel);
     overflow: hidden;
-    min-height: 60vh;
+    min-height: 72vh;
     cursor: grab;
   }
   .stage.dragging { cursor: grabbing; }
@@ -241,31 +241,48 @@ function apply() {
 }
 function zoom(factor) { scale = Math.min(6, Math.max(0.2, scale * factor)); apply(); }
 
-stage.addEventListener("wheel", (event) => {
-  event.preventDefault();
-  zoom(event.deltaY < 0 ? 1.12 : 1 / 1.12);
-}, { passive: false });
-
-stage.addEventListener("pointerdown", (event) => {
-  if (event.target.closest("a, button, .node")) return;
-  dragging = true; startX = event.clientX - x; startY = event.clientY - y;
-  stage.classList.add("dragging");
-  stage.setPointerCapture(event.pointerId);
-});
-stage.addEventListener("pointermove", (event) => {
-  if (!dragging) return;
-  x = event.clientX - startX; y = event.clientY - startY; apply();
-});
-for (const type of ["pointerup", "pointercancel"])
-  stage.addEventListener(type, () => { dragging = false; stage.classList.remove("dragging"); });
+// A wide flowchart loads unreadably small inside a fixed stage. Mermaid sizes
+// its SVG to the container via a viewBox, so pin the element to the viewBox's
+// intrinsic size first - otherwise the fit scale compounds with Mermaid's own
+// scaling and the diagram shrinks instead of filling the stage.
+function fit() {
+  const svg = viewport.querySelector("svg");
+  if (!svg || !svg.viewBox?.baseVal?.width) return;
+  const natural = svg.viewBox.baseVal;
+  svg.style.maxWidth = "none";
+  svg.setAttribute("width", natural.width);
+  svg.setAttribute("height", natural.height);
+  const pad = 40;
+  const available = stage.getBoundingClientRect();
+  const ideal = Math.min(
+    (available.width - pad) / natural.width,
+    (available.height - pad) / natural.height,
+    2,
+  );
+  // A very wide graph fitted to the stage becomes unreadable. Keep text legible
+  // and let the viewer pan instead, anchored at the start of the diagram.
+  scale = Math.max(ideal, 0.45);
+  const clamped = scale > ideal;
+  x = clamped ? pad / 2 : (available.width - natural.width * scale) / 2;
+  y = clamped ? pad / 2 : (available.height - natural.height * scale) / 2;
+  // Do not reserve stage height the scaled diagram cannot fill.
+  if (clamped)
+    stage.style.height =
+      Math.min(window.innerHeight * 0.8, natural.height * scale + pad) + "px";
+  apply();
+}
 
 document.getElementById("zoom-in").onclick = () => zoom(1.25);
 document.getElementById("zoom-out").onclick = () => zoom(1 / 1.25);
-document.getElementById("reset").onclick = () => { scale = 1; x = 0; y = 0; apply(); };
+document.getElementById("reset").onclick = fit;
 document.getElementById("theme").onclick = async () => {
   document.documentElement.dataset.theme = dark() ? "light" : "dark";
   await draw();
+  fit();
 };
+
+fit();
+window.addEventListener("resize", fit);
 </script>
 </body>
 </html>

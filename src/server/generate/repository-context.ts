@@ -40,9 +40,35 @@ const MANIFEST =
 const SENSITIVE =
   /(?:^|\/)(?:.*(?:secrets?|credentials?|passwords?|private[_-]?key).*|\.env.*|.*\.(?:pem|key|p12|pfx))$/i;
 
+/**
+ * Directory names the exclusion pattern should not act on for this repository.
+ * The defaults assume conventional meanings - `build` is compiler output,
+ * `docs` is prose - but a project may keep real source under those names, and
+ * excluding a whole subsystem produces a confidently wrong diagram.
+ */
+function unexcludedDirectories(): Set<string> {
+  const raw = process.env.GD_UNEXCLUDE_DIRS?.trim();
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+}
+
 export function isArchitectureSource(path: string): boolean {
+  const kept = unexcludedDirectories();
+  // Mask only the segments being un-excluded, so `build/tests/x.py` is still
+  // dropped for being a test while `build/geometry/x.py` is kept.
+  const masked = kept.size
+    ? path
+        .split("/")
+        .map((segment) => (kept.has(segment) ? "__kept__" : segment))
+        .join("/")
+    : path;
   return (
-    !EXCLUDED.test(path) &&
+    !EXCLUDED.test(masked) &&
     !SENSITIVE.test(path) &&
     (SOURCE.test(path) || MANIFEST.test(path))
   );

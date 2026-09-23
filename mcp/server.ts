@@ -16,6 +16,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { writeFile } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 import {
@@ -280,6 +281,12 @@ function toolDefinitions() {
             minimum: 1,
             description: "Cap on returned tree lines. Default 500.",
           },
+          include_dirs: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Directory names to stop excluding, e.g. [\"build\"]. Compare top_level_directories against the tree to spot a subsystem being dropped.",
+          },
         },
         additionalProperties: false,
       },
@@ -320,6 +327,12 @@ function toolDefinitions() {
             items: { type: "string" },
             description:
               "Explicit repo-relative paths to read instead of the ranked selection.",
+          },
+          include_dirs: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Directory names to stop excluding, e.g. [\"build\"] when a project keeps real source under a name the default pattern treats as output. Check read_repo_structure for top-level directories that are missing from the tree.",
           },
         },
         additionalProperties: false,
@@ -507,6 +520,18 @@ function buildDiagram(args: Record<string, unknown>): BuildResult {
   };
 }
 
+/** Directory names present on disk, for spotting excluded subsystems. */
+function topLevelDirectories(root: string): string[] {
+  try {
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 function applyDepthOverrides(args: Record<string, unknown>) {
   const set = (envName: string, value: unknown) => {
     if (typeof value === "number" && Number.isFinite(value))
@@ -516,6 +541,8 @@ function applyDepthOverrides(args: Record<string, unknown>) {
   set("GD_MAX_SOURCE_CHARACTERS", args.max_characters);
   set("GD_MAX_SOURCE_FILE_CHARACTERS", args.max_file_characters);
   set("GD_DIRECTORY_DIVERSITY_PENALTY", args.directory_diversity_penalty);
+  if (Array.isArray(args.include_dirs))
+    process.env.GD_UNEXCLUDE_DIRS = args.include_dirs.map(String).join(",");
 }
 
 async function handleTool(name: string, args: Record<string, unknown>) {
@@ -544,7 +571,9 @@ async function handleTool(name: string, args: Record<string, unknown>) {
         bound = null;
         return ok({
           root_path: repo.rootPath,
-          name: repo.origin.name ?? basename(repo.rootPath),
+          name: repo.origin.pathPrefix
+            ? basename(repo.rootPath)
+            : (repo.origin.name ?? basename(repo.rootPath)),
           total_paths: repo.pathTypes.size,
           candidate_sources: repo.sourceBlobs?.size ?? 0,
           has_readme: repo.readme.length > 0,
@@ -581,6 +610,7 @@ async function handleTool(name: string, args: Record<string, unknown>) {
     case "read_repo_structure": {
       if (!activeRootPath)
         return fail("no_active_root", "Call set_repo_root first.", true);
+      applyDepthOverrides(args);
       const repo = await readLocalRepository(activeRootPath);
       const context = prepareRepositoryContext(repo);
       const maxPaths =
@@ -591,6 +621,14 @@ async function handleTool(name: string, args: Record<string, unknown>) {
         total_paths: repo.pathTypes.size,
         candidate_sources: repo.sourceBlobs?.size ?? 0,
         tree_truncated: context.treeTruncated || lines.length > maxPaths,
+        // Directories present on disk but absent from the tree were excluded;
+        // a real subsystem under such a name needs include_dirs.
+        top_level_directories_on_disk: topLevelDirectories(repo.rootPath),
+        top_level_directories_in_tree: [
+          ...new Set(
+            lines.filter((p) => p.includes("/")).map((p) => p.split("/")[0]!),
+          ),
+        ].sort(),
         file_tree: lines.slice(0, maxPaths).join("\n"),
         readme_characters: context.readme.length,
         ranked_preview: context.selectedPaths,
@@ -726,7 +764,9 @@ async function handleTool(name: string, args: Record<string, unknown>) {
             ? resolve(args.out_path.trim())
             : join(bound!.rootPath, "architecture.html");
         const html = renderDiagramHtml(diagram, {
-          name: origin.name ?? basename(bound!.rootPath),
+          name: origin.pathPrefix
+            ? basename(bound!.rootPath)
+            : (origin.name ?? basename(bound!.rootPath)),
           rootPath: bound!.rootPath,
           ref: origin.commit ?? origin.branch,
           remoteUrl: origin.remoteUrl,
