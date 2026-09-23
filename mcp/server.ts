@@ -15,7 +15,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { basename, resolve } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 
 import {
   readLocalRepository,
@@ -37,6 +38,7 @@ import {
 } from "../src/server/generate/graph";
 import { diagramGraphSchema } from "../src/features/diagram/graph";
 import { validateMermaidSyntax } from "../src/server/generate/mermaid";
+import { renderDiagramHtml } from "../src/server/generate/diagram-html";
 import type { GithubData } from "../src/server/generate/github";
 
 const SERVER_NAME = "repo-diagram";
@@ -55,14 +57,19 @@ const INSTRUCTIONS = [
   "refuses any node whose path is not in the bound selection's file tree, so",
   "do not invent files. On a validation error, read issues and feedback and",
   "repair the graph yourself rather than asking the user. Then",
-  "compile_repo_diagram. Assert an edge only when you saw the caller in an",
-  "excerpt; an absent edge is better than a guessed one, and missing source is",
-  "never proof that no edge exists.",
+  "compile_repo_diagram, or render_diagram_html when the user wants something",
+  "to look at rather than Mermaid source. Assert an edge only when you saw the",
+  "caller in an excerpt; an absent edge is better than a guessed one, and",
+  "missing source is never proof that no edge exists.",
 ].join(" ");
 
 interface BoundSelection {
   rootPath: string;
-  repo: GithubData & { rootPath: string; origin: LocalGitOrigin };
+  repo: GithubData & {
+    rootPath: string;
+    origin: LocalGitOrigin;
+    nestedRepositories: string[];
+  };
   fileTree: string;
   fileTreeLookup: Set<string>;
   selectedPaths: string[];
@@ -115,6 +122,7 @@ const HOW_IT_WORKS = {
     "get_graph_contract - the exact graph schema, caps and id rules",
     "validate_repo_graph - check your proposed graph against the real tree",
     "compile_repo_diagram - render validated graph to Mermaid",
+    "render_diagram_html - write a browsable HTML file the user can open",
   ],
   honesty_rules: [
     "Every node path must exist in the bound file tree. Invented paths are refused.",
@@ -190,6 +198,13 @@ const TOOL_HELP: Record<string, unknown> = {
     refuse: "A graph that does not validate.",
     example: { graph: "<a graph that passed validate_repo_graph>" },
     outputs: "Mermaid source, node and edge counts, syntax check result.",
+    next: ["render_diagram_html"],
+  },
+  render_diagram_html: {
+    use: "Give the user something to look at: a self-contained HTML file with pan, zoom, clickable nodes and the list of files behind the diagram.",
+    refuse: "A graph that does not validate.",
+    example: { graph: "<validated graph>", out_path: "C:/tmp/architecture.html" },
+    outputs: "Path of the written file. Opens directly in a browser, no server.",
     next: [],
   },
   how_repo_diagram_works: {
@@ -347,6 +362,29 @@ function toolDefinitions() {
       annotations: { readOnlyHint: true },
     },
     {
+      name: "render_diagram_html",
+      title: "Render Diagram To HTML",
+      description:
+        "Write a validated graph to a self-contained HTML file that opens directly in a browser, with pan, zoom and the list of files the diagram was based on. Returns the file path.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          graph: { type: "object", description: "A graph that passed validation." },
+          out_path: {
+            type: "string",
+            description:
+              "Where to write the file. Defaults to <repo>/architecture.html.",
+          },
+          link_base_url: {
+            type: "string",
+            description: "Optional base URL for node click links.",
+          },
+        },
+        required: ["graph"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "compile_repo_diagram",
       title: "Compile Repo Diagram",
       description:
@@ -373,21 +411,27 @@ const CLICK_LINE =
   /^click (\S+) "https:\/\/github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\/[^/]+\/(.*)"$/;
 
 /**
- * Retarget or remove the compiler's GitHub links. Used when the directory is
- * not a GitHub clone, so the compiler's URLs point nowhere real. A GitLab
- * clone gets correct GitLab URLs; anything else loses its links rather than
- * carrying a destination that does not exist.
+ * Blob URL prefix for a recognized forge. Includes the analyzed directory's
+ * position inside its repository: node paths are relative to that directory,
+ * but forge URLs are rooted at the repo, so a subdirectory needs its prefix
+ * added back or every link 404s.
  */
-function rewriteClickLinks(
-  diagram: string,
-  linkBaseUrl: string,
-  origin?: LocalGitOrigin,
-): string {
-  const base =
-    linkBaseUrl ||
-    (origin?.host === "gitlab" && origin.owner && origin.name
-      ? `https://gitlab.com/${origin.owner}/${origin.name}/-/blob/${origin.commit ?? origin.branch}`
-      : "");
+function forgeBaseUrl(origin: LocalGitOrigin): string {
+  if (!origin.host || !origin.owner || !origin.name) return "";
+  const ref = origin.commit ?? origin.branch;
+  const root =
+    origin.host === "gitlab"
+      ? `https://gitlab.com/${origin.owner}/${origin.name}/-/blob/${ref}`
+      : `https://github.com/${origin.owner}/${origin.name}/blob/${ref}`;
+  return `${root}/${origin.pathPrefix}`.replace(/\/+$/, "");
+}
+
+/**
+ * Point the compiler's placeholder links at a real base URL, or drop them.
+ * Without a recognized remote there is nowhere real to link to, and a URL that
+ * does not exist is worse than no link at all.
+ */
+function rewriteClickLinks(diagram: string, base: string): string {
   const lines = diagram.split("\n").map((line) => {
     const match = CLICK_LINE.exec(line.trim());
     if (!match) return line;
@@ -395,6 +439,72 @@ function rewriteClickLinks(
     return `click ${match[1]} "${base.replace(/\/$/, "")}/${match[2]}"`;
   });
   return lines.filter((line): line is string => line !== null).join("\n");
+}
+
+/**
+ * Shared by compile_repo_diagram and render_diagram_html: validate the graph
+ * against the bound tree, compile it, and resolve node links honestly.
+ */
+type BuildResult =
+  | { ok: false; response: ReturnType<typeof fail> }
+  | {
+      ok: true;
+      diagram: string;
+      normalized: ReturnType<typeof normalizeKnownGraphPaths>;
+      origin: LocalGitOrigin;
+      linksAreReal: boolean;
+    };
+
+function buildDiagram(args: Record<string, unknown>): BuildResult {
+  if (!bound)
+    return {
+      ok: false,
+      response: fail("no_bound_selection", "Call read_repo_sources first.", true),
+    };
+  const parsed = diagramGraphSchema.safeParse(args.graph);
+  if (!parsed.success)
+    return {
+      ok: false,
+      response: fail(
+        "schema_invalid",
+        "Graph does not match the contract. Validate it first.",
+        false,
+        { issues: parsed.error.issues.slice(0, 20) },
+      ),
+    };
+  const normalized = normalizeKnownGraphPaths(parsed.data, bound.fileTreeLookup);
+  const check = validateDiagramGraph(normalized, bound.fileTreeLookup);
+  if (!check.valid)
+    return {
+      ok: false,
+      response: fail(
+        "graph_invalid",
+        formatGraphValidationFeedback(check.issues),
+        false,
+        { issues: check.issues },
+      ),
+    };
+
+  const origin = bound.repo.origin;
+  // Compile with placeholder coordinates, then retarget every link once. That
+  // keeps one code path for repo roots, subdirectories, GitLab and no remote.
+  const compiled = compileDiagramGraph({
+    graph: normalized,
+    username: "local",
+    repo: basename(bound.rootPath),
+    branch: origin.commit ?? origin.branch,
+    pathTypes: bound.repo.pathTypes,
+  });
+  const explicitBase =
+    typeof args.link_base_url === "string" ? args.link_base_url.trim() : "";
+  const linkBase = explicitBase || forgeBaseUrl(origin);
+  return {
+    ok: true,
+    diagram: rewriteClickLinks(compiled, linkBase),
+    normalized,
+    origin,
+    linksAreReal: Boolean(linkBase),
+  };
 }
 
 function applyDepthOverrides(args: Record<string, unknown>) {
@@ -446,9 +556,14 @@ async function handleTool(name: string, args: Record<string, unknown>) {
             branch: repo.origin.branch,
             commit: repo.origin.commit,
             uncommitted_changes: repo.origin.dirty,
+            path_prefix: repo.origin.pathPrefix,
           },
+          nested_repositories_excluded: repo.nestedRepositories,
           reading:
             "the working tree on disk, not the remote" +
+            (repo.nestedRepositories.length
+              ? ` - nested repositories (${repo.nestedRepositories.join(", ")}) are separate projects and were excluded; point the tool at one directly to diagram it`
+              : "") +
             (repo.origin.dirty
               ? " - it has uncommitted changes, so it differs from the pushed commit"
               : ""),
@@ -599,63 +714,50 @@ async function handleTool(name: string, args: Record<string, unknown>) {
       });
     }
 
-    case "compile_repo_diagram": {
-      if (!bound)
-        return fail("no_bound_selection", "Call read_repo_sources first.", true);
-      const parsed = diagramGraphSchema.safeParse(args.graph);
-      if (!parsed.success)
-        return fail(
-          "schema_invalid",
-          "Graph does not match the contract. Validate it first.",
-          false,
-          { issues: parsed.error.issues.slice(0, 20) },
-        );
-      const normalized = normalizeKnownGraphPaths(
-        parsed.data,
-        bound.fileTreeLookup,
-      );
-      const check = validateDiagramGraph(normalized, bound.fileTreeLookup);
-      if (!check.valid)
-        return fail(
-          "graph_invalid",
-          formatGraphValidationFeedback(check.issues),
-          false,
-          { issues: check.issues },
-        );
-      const origin = bound.repo.origin;
-      // The compiler emits GitHub blob URLs from username/repo/branch. When
-      // this directory is a clone of a GitHub repo those coordinates are real,
-      // so let it build genuine links. Otherwise a github.com URL would be a
-      // fabricated destination: retarget it or drop it.
-      const compiled = compileDiagramGraph({
-        graph: normalized,
-        username: origin.host === "github" ? origin.owner! : "local",
-        repo:
-          origin.host === "github" ? origin.name! : basename(bound.rootPath),
-        branch: origin.commit ?? origin.branch,
-        pathTypes: bound.repo.pathTypes,
-      });
-      const explicitBase =
-        typeof args.link_base_url === "string" ? args.link_base_url.trim() : "";
-      const diagram =
-        origin.host === "github" && !explicitBase
-          ? compiled
-          : rewriteClickLinks(compiled, explicitBase, origin);
+    case "compile_repo_diagram":
+    case "render_diagram_html": {
+      const built = buildDiagram(args);
+      if (!built.ok) return built.response;
+      const { diagram, normalized, origin, linksAreReal } = built;
+
+      if (name === "render_diagram_html") {
+        const outPath =
+          typeof args.out_path === "string" && args.out_path.trim()
+            ? resolve(args.out_path.trim())
+            : join(bound!.rootPath, "architecture.html");
+        const html = renderDiagramHtml(diagram, {
+          name: origin.name ?? basename(bound!.rootPath),
+          rootPath: bound!.rootPath,
+          ref: origin.commit ?? origin.branch,
+          remoteUrl: origin.remoteUrl,
+          uncommittedChanges: origin.dirty,
+          nodeCount: normalized.nodes.length,
+          edgeCount: normalized.edges.length,
+          readPaths: bound!.readPaths,
+          linksResolved: linksAreReal,
+          nestedRepositories: bound!.repo.nestedRepositories,
+        });
+        await writeFile(outPath, html, "utf8");
+        return ok({
+          html_path: outPath,
+          node_count: normalized.nodes.length,
+          edge_count: normalized.edges.length,
+          open_with: "Open this file directly in a browser. No server needed.",
+        });
+      }
+
       const syntax = await validateMermaidSyntax(diagram).catch(
         (error: unknown) => ({
           valid: false,
           error: error instanceof Error ? error.message : String(error),
         }),
       );
-      const linksAreReal = Boolean(
-        explicitBase || (origin.host && origin.owner && origin.name),
-      );
       return ok({
         mermaid: diagram,
         node_count: normalized.nodes.length,
         edge_count: normalized.edges.length,
         syntax_check: syntax,
-        read_paths: bound.readPaths,
+        read_paths: bound!.readPaths,
         links: linksAreReal
           ? {
               resolved: true,

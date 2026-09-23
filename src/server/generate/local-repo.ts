@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 
 import type { GithubData, SourceBlob } from "./github";
@@ -50,6 +50,13 @@ export interface LocalGitOrigin {
   /** Checked-out commit, so links point at what was actually read. */
   commit: string | null;
   dirty: boolean;
+  /**
+   * Where the analyzed directory sits inside its repository, with a trailing
+   * slash, or "" at the repo root. Analyzing a subdirectory yields paths
+   * relative to that subdirectory, but forge URLs are rooted at the repo, so
+   * this prefix is what keeps generated links from 404ing.
+   */
+  pathPrefix: string;
 }
 
 function git(root: string, args: string[]): string | null {
@@ -94,8 +101,10 @@ function readGitOrigin(root: string): LocalGitOrigin {
   const head = git(root, ["rev-parse", "--abbrev-ref", "HEAD"]);
   const commit = git(root, ["rev-parse", "HEAD"]);
   const status = git(root, ["status", "--porcelain"]);
+  const prefix = git(root, ["rev-parse", "--show-prefix"]) ?? "";
   return {
     remoteUrl,
+    pathPrefix: prefix,
     ...parseRemoteUrl(remoteUrl),
     // A detached HEAD reports "HEAD"; the commit is the usable ref then.
     branch: head && head !== "HEAD" ? head : (commit ?? "main"),
@@ -120,8 +129,22 @@ function listTrackedFiles(root: string): string[] | null {
   }
 }
 
-function walkDirectory(root: string): string[] {
+/**
+ * A nested repository is its own project, not part of this one. Diagram the
+ * outermost repo only; point the tool at a nested one directly to get that.
+ * `git ls-files` already does this when the nested repos are ignored, so this
+ * only matters on the non-git fallback path.
+ */
+function isNestedRepository(directory: string): boolean {
+  return existsSync(join(directory, ".git"));
+}
+
+function walkDirectory(root: string): {
+  paths: string[];
+  skippedRepositories: string[];
+} {
   const paths: string[] = [];
+  const skippedRepositories: string[] = [];
   const stack: string[] = [root];
   while (stack.length) {
     const directory = stack.pop()!;
@@ -134,13 +157,39 @@ function walkDirectory(root: string): string[] {
     for (const entry of entries) {
       const full = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!SKIP_DIRECTORIES.has(entry.name)) stack.push(full);
+        if (SKIP_DIRECTORIES.has(entry.name)) continue;
+        if (isNestedRepository(full)) {
+          skippedRepositories.push(toPosix(relative(root, full)));
+          continue;
+        }
+        stack.push(full);
       } else if (entry.isFile()) {
         paths.push(toPosix(relative(root, full)));
       }
     }
   }
-  return paths;
+  return { paths, skippedRepositories };
+}
+
+/**
+ * Nested repositories that git already excluded, reported so the caller can
+ * say what was left out rather than silently under-covering the tree.
+ */
+function findNestedRepositories(root: string, tracked: Set<string>): string[] {
+  const found: string[] = [];
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || SKIP_DIRECTORIES.has(entry.name)) continue;
+    const name = toPosix(entry.name);
+    if (isNestedRepository(join(root, entry.name)) && !tracked.has(name))
+      found.push(name);
+  }
+  return found;
 }
 
 async function readReadme(root: string): Promise<string> {
@@ -162,14 +211,28 @@ async function readReadme(root: string): Promise<string> {
  */
 export async function readLocalRepository(
   rootPath: string,
-): Promise<GithubData & { rootPath: string; origin: LocalGitOrigin }> {
+): Promise<
+  GithubData & {
+    rootPath: string;
+    origin: LocalGitOrigin;
+    nestedRepositories: string[];
+  }
+> {
   const root = resolve(rootPath);
   const rootStat = await stat(root).catch(() => null);
   if (!rootStat?.isDirectory())
     throw new Error(`Not a directory: ${rootPath}`);
 
-  const files = listTrackedFiles(root) ?? walkDirectory(root);
+  const tracked = listTrackedFiles(root);
+  const walked = tracked ? null : walkDirectory(root);
+  const files = tracked ?? walked!.paths;
   if (!files.length) throw new Error(`No files found under ${rootPath}`);
+
+  // Nested repos are excluded either way; report them so the diagram can say
+  // what it left out instead of appearing to cover the whole tree.
+  const nestedRepositories = tracked
+    ? findNestedRepositories(root, new Set(tracked.map((p) => p.split("/")[0]!)))
+    : walked!.skippedRepositories;
 
   const pathTypes = new Map<string, "blob" | "tree">();
   const sourceBlobs = new Map<string, SourceBlob>();
@@ -202,6 +265,7 @@ export async function readLocalRepository(
   return {
     rootPath: root,
     origin,
+    nestedRepositories,
     // Real branch when this is a clone, so compiled links resolve.
     defaultBranch: origin.branch,
     fileTree: [...pathTypes.keys()].sort().join("\n"),

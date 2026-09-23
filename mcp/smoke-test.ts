@@ -7,6 +7,9 @@
  */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const repoPath = process.argv[2] ?? process.cwd();
 const child = spawn(
@@ -67,7 +70,7 @@ async function main() {
   const tools = await request("tools/list", {});
   console.log(`\ntools/list -> ${tools.tools.length} tools`);
   for (const tool of tools.tools) console.log(`  ${tool.name}`);
-  check("eight tools exposed", tools.tools.length === 8);
+  check("nine tools exposed", tools.tools.length === 9);
 
   console.log("\nworkflow:");
   const root = payload(await call("set_repo_root", { root_path: repoPath }));
@@ -150,6 +153,21 @@ async function main() {
     check("compiles to mermaid", compiled.mermaid?.startsWith("flowchart"));
     check("mermaid syntax valid", compiled.syntax_check?.valid === true,
       JSON.stringify(compiled.syntax_check));
+    const outPath = join(tmpdir(), `diagram-smoke-${Date.now()}.html`);
+    const rendered = payload(
+      await call("render_diagram_html", { graph: honest, out_path: outPath }),
+    );
+    check(
+      "writes an html file",
+      rendered.html_path === outPath,
+      JSON.stringify(rendered).slice(0, 200),
+    );
+    const html = readFileSync(outPath, "utf8");
+    check("html embeds the diagram", html.includes("flowchart TD"));
+    check("html lists the files read", html.includes(realPath));
+    check("html has no server dependency", !html.includes("localhost"));
+    console.log(`  html: ${outPath} (${html.length} bytes)`);
+
     console.log("\n--- compiled ---");
     console.log(compiled.mermaid);
   }

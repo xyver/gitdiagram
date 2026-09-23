@@ -127,3 +127,30 @@ describe("readLocalSourceContext", () => {
     expect(sources.unavailableCount).toBe(1);
   });
 });
+
+describe("nested repositories", () => {
+  it("excludes a nested repo from a plain directory walk and names it", async () => {
+    const root = makeRepo(false);
+    const nested = join(root, "vendored");
+    mkdirSync(nested);
+    writeFileSync(join(nested, "lib.ts"), "export const nested = true;\n");
+    execFileSync("git", ["init", "-q"], { cwd: nested, stdio: "ignore" });
+
+    const repo = await readLocalRepository(root);
+    expect(repo.nestedRepositories).toEqual(["vendored"]);
+    expect(repo.pathTypes.has("vendored/lib.ts")).toBe(false);
+    expect(repo.pathTypes.has("src/index.ts")).toBe(true);
+  });
+
+  it("records the path prefix for a subdirectory of a repo", async () => {
+    const root = makeRepo(true);
+    const repo = await readLocalRepository(join(root, "src"));
+    expect(repo.origin.pathPrefix).toBe("src/");
+    expect(repo.origin.owner).toBe("acme");
+  });
+
+  it("uses an empty prefix at the repository root", async () => {
+    const repo = await readLocalRepository(makeRepo(true));
+    expect(repo.origin.pathPrefix).toBe("");
+  });
+});

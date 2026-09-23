@@ -3,7 +3,8 @@
  * Next.js involvement. Drives the same generation modules the hosted service
  * uses, so depth and model are the only things that differ.
  *
- *   bun run scripts/local-diagram.ts <path> [--out <file>] [--files N]
+ *   bun run scripts/local-diagram.ts <path> [--out <file>] [--html <file>]
+ *                                       [--files N]
  *
  * Environment:
  *   OPENAI_API_KEY / OPENROUTER_API_KEY   provider credentials
@@ -16,7 +17,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 
 import {
   readLocalRepository,
@@ -45,6 +46,7 @@ import {
   SYSTEM_FIRST_PROMPT,
 } from "../src/server/generate/prompts";
 import { toTaggedMessage } from "../src/server/generate/format";
+import { renderDiagramHtml } from "../src/server/generate/diagram-html";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -151,11 +153,33 @@ async function main() {
     pathTypes: repo.pathTypes,
   });
 
+  const html = flags.get("html");
+  if (html) {
+    const htmlPath = resolve(html);
+    await writeFile(
+      htmlPath,
+      renderDiagramHtml(diagram, {
+        name: repo.origin.name ?? basename(repo.rootPath),
+        rootPath: repo.rootPath,
+        ref: repo.origin.commit ?? repo.origin.branch,
+        remoteUrl: repo.origin.remoteUrl,
+        uncommittedChanges: repo.origin.dirty,
+        nodeCount: graphResult.graph.nodes.length,
+        edgeCount: graphResult.graph.edges.length,
+        readPaths: sources.paths,
+        unavailableCount: sources.unavailableCount,
+        linksResolved: repo.origin.host === "github",
+      }),
+      "utf8",
+    );
+    console.error(`wrote ${htmlPath} - open it in a browser`);
+  }
+
   const out = flags.get("out");
   if (out) {
     await writeFile(out, diagram, "utf8");
     console.error(`wrote ${out}`);
-  } else {
+  } else if (!html) {
     console.log(diagram);
   }
 }

@@ -31,6 +31,7 @@ Discovery-first. Eight tools.
 - `get_graph_contract` - the exact graph schema, id rules and caps
 - `validate_repo_graph` - check a proposed graph against the bound tree
 - `compile_repo_diagram` - render a validated graph to Mermaid
+- `render_diagram_html` - write a browsable HTML file
 
 `read_repo_sources` is the binding step, and `validate_repo_graph` enforces its
 file tree: a node whose `path` is not in the repository is refused with
@@ -40,6 +41,24 @@ file that does not exist is wrong the same way a fabricated citation is wrong.
 
 Errors carry `error.code`, `guidance` and `clarification.required`. Ask the user
 only when `clarification.required` is true; otherwise repair the call directly.
+
+## Seeing the diagram
+
+Mermaid source is not a diagram until something renders it, so
+`render_diagram_html` writes one self-contained HTML file you open directly from
+disk. No server, no build step - the only external load is Mermaid from a CDN.
+
+The page has pan and zoom, a light/dark toggle, clickable nodes when links
+resolved, and a collapsible list of exactly which files the diagram was built
+from. That list travels with the picture on purpose: a diagram is only as good
+as the files behind it, and a missing edge usually means the caller was not
+among them.
+
+The CLI has the same output:
+
+```powershell
+bun run scripts/local-diagram.ts <repo-path> --html architecture.html
+```
 
 ## Depth
 
