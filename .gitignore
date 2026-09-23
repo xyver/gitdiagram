@@ -68,3 +68,6 @@ venv
 
 # vscode
 .vscode/
+
+# Generated architecture diagrams
+output/

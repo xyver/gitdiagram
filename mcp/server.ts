@@ -15,9 +15,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { readdirSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   readLocalRepository,
@@ -386,7 +386,7 @@ function toolDefinitions() {
           out_path: {
             type: "string",
             description:
-              "Where to write the file. Defaults to <repo>/architecture.html.",
+              "Where to write the file. Defaults to this project's output/ folder as <name>_<timestamp>.html, so runs accumulate instead of overwriting and nothing is written into the analyzed repository.",
           },
           link_base_url: {
             type: "string",
@@ -518,6 +518,23 @@ function buildDiagram(args: Record<string, unknown>): BuildResult {
     origin,
     linksAreReal: Boolean(linkBase),
   };
+}
+
+/** This project's own root, so outputs land beside it rather than in the
+ * repository being analyzed. */
+const PROJECT_ROOT = resolve(
+  dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
+  "..",
+);
+
+/** Filesystem-safe local timestamp: 2026-09-23_152340. */
+function timestamp(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return (
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  );
 }
 
 /** Directory names present on disk, for spotting excluded subsystems. */
@@ -759,10 +776,15 @@ async function handleTool(name: string, args: Record<string, unknown>) {
       const { diagram, normalized, origin, linksAreReal } = built;
 
       if (name === "render_diagram_html") {
+        const name = (origin.pathPrefix
+          ? basename(bound!.rootPath)
+          : (origin.name ?? basename(bound!.rootPath))
+        ).replace(/[^\w.-]+/g, "-");
         const outPath =
           typeof args.out_path === "string" && args.out_path.trim()
             ? resolve(args.out_path.trim())
-            : join(bound!.rootPath, "architecture.html");
+            : join(PROJECT_ROOT, "output", `${name}_${timestamp()}.html`);
+        await mkdir(dirname(outPath), { recursive: true });
         const html = renderDiagramHtml(diagram, {
           name: origin.pathPrefix
             ? basename(bound!.rootPath)

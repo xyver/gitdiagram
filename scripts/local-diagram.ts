@@ -3,8 +3,10 @@
  * Next.js involvement. Drives the same generation modules the hosted service
  * uses, so depth and model are the only things that differ.
  *
- *   bun run scripts/local-diagram.ts <path> [--out <file>] [--html <file>]
+ *   bun run scripts/local-diagram.ts <path> [--out <file>] [--html [file]]
  *                                       [--files N]
+ *
+ * --html with no path writes output/<name>_<timestamp>.html in this project.
  *
  * Environment:
  *   OPENAI_API_KEY / OPENROUTER_API_KEY   provider credentials
@@ -17,7 +19,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   readLocalRepository,
@@ -154,8 +157,25 @@ async function main() {
   });
 
   const html = flags.get("html");
-  if (html) {
-    const htmlPath = resolve(html);
+  if (html !== undefined) {
+    // Default into this project's output folder so runs accumulate and nothing
+    // is written into the repository being analyzed.
+    const name = (repo.origin.name ?? basename(repo.rootPath)).replace(
+      /[^\w.-]+/g,
+      "-",
+    );
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[:T]/g, "")
+      .replace(/\..+$/, "");
+    const htmlPath = html
+      ? resolve(html)
+      : join(
+          dirname(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
+          "output",
+          `${name}_${stamp}.html`,
+        );
+    await mkdir(dirname(htmlPath), { recursive: true });
     await writeFile(
       htmlPath,
       renderDiagramHtml(diagram, {
@@ -179,7 +199,7 @@ async function main() {
   if (out) {
     await writeFile(out, diagram, "utf8");
     console.error(`wrote ${out}`);
-  } else if (!html) {
+  } else if (html === undefined) {
     console.log(diagram);
   }
 }

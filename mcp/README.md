@@ -21,7 +21,7 @@ Nothing in this server reaches the network.
 
 ## Tools
 
-Discovery-first. Eight tools.
+Discovery-first. Nine tools.
 
 - `how_repo_diagram_works` - the model, the workflow, the honesty rules
 - `get_tool_help` - one tool's use/refusal guidance, example, outputs, next calls
@@ -54,11 +54,18 @@ from. That list travels with the picture on purpose: a diagram is only as good
 as the files behind it, and a missing edge usually means the caller was not
 among them.
 
+Output lands in this project's `output/` folder as
+`<name>_<YYYY-MM-DD_HHMMSS>.html`, which is gitignored. Runs accumulate rather
+than overwriting, and nothing is ever written into the repository being
+analyzed. Pass `out_path` to put it somewhere specific.
+
 The CLI has the same output:
 
 ```powershell
-bun run scripts/local-diagram.ts <repo-path> --html architecture.html
+bun run scripts/local-diagram.ts <repo-path> --html
 ```
+
+`--html` with no path uses the same default; give it a path to override.
 
 ## Depth
 
