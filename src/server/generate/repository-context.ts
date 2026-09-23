@@ -1,13 +1,35 @@
 import type { GithubData } from "./github";
 import type { AIProvider } from "./model-config";
 
-export const MAX_SOURCE_CHARACTERS = 48_000;
-export const MAX_SOURCE_FILES = 12;
+// Depth limits. The hosted service ships conservative defaults sized for a
+// shared budget; a local run can raise them with env overrides.
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+// Read at call time, not at import time: an in-process caller (the MCP server)
+// sets these per request, and a module-level const would freeze the first value.
+export const maxSourceCharacters = () =>
+  envInt("GD_MAX_SOURCE_CHARACTERS", 48_000);
+export const maxSourceFiles = () => envInt("GD_MAX_SOURCE_FILES", 12);
+/** Per-file ceiling inside the fair-share excerpt split. */
+export const maxSourceFileCharacters = () =>
+  envInt("GD_MAX_SOURCE_FILE_CHARACTERS", 10_000);
+/**
+ * Penalty applied per file already taken from the same directory. Lowering it
+ * lets a deep run cover several files from one subsystem.
+ */
+export const directoryDiversityPenalty = () =>
+  envInt("GD_DIRECTORY_DIVERSITY_PENALTY", 5);
+
 // Framework entry points can be large (FastAPI routing, editor controllers).
 // Read them within a byte bound, then excerpt into the unchanged model budget.
 export const MAX_SOURCE_FILE_BYTES = 512_000;
-const MAX_TREE_CHARACTERS = 24_000;
-const MAX_README_CHARACTERS = 8_500;
+const maxTreeCharacters = () => envInt("GD_MAX_TREE_CHARACTERS", 24_000);
+const maxReadmeCharacters = () => envInt("GD_MAX_README_CHARACTERS", 8_500);
 
 const EXCLUDED =
   /(^|\/)(?:\.[^/]+|tests?|__tests__|testdata|fixtures?|examples?(?:_src)?|samples?|docs?(?:_src)?|tutorials?(?:_src)?|documentation|bench|benchmarks?|vendor|third_party|node_modules|dist|build|generated|migrations?|alembic|assets|locales?|translations?)(\/|$)|(?:\.test(?:-d)?|\.spec|\.generated|\.min)\.|(?:^|\/)(?:test\.[^/]+|bench(?:mark|marker)?\.[^/]+|test_[^/]+|[^/]+_test\.[^/]+)$/i;
@@ -84,13 +106,15 @@ export function selectSourcePaths(
     })
     .map(([path]) => path)
     .sort((a, b) => score(b) - score(a) || a.localeCompare(b));
+  const fileLimit = maxSourceFiles();
+  const penalty = directoryDiversityPenalty();
   const selected: string[] = [];
   const directories = new Map<string, number>();
   // A soft diversity penalty lets important siblings coexist while keeping
   // another subsystem's entry point ahead of an inventory of helper files.
   const remaining = new Set(candidates);
   let manifests = 0;
-  while (remaining.size && selected.length < MAX_SOURCE_FILES) {
+  while (remaining.size && selected.length < fileLimit) {
     const ranked = [...remaining]
       .filter((path) => !MANIFEST.test(path) || manifests < 1)
       .sort((a, b) => {
@@ -106,7 +130,7 @@ export function selectSourcePaths(
             10,
             Math.log2(1 + (data.sourceBlobs?.get(path)?.size ?? 0) / 1000),
           ) -
-          5 *
+          penalty *
             (directories.get(
               path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "",
             ) ?? 0);
@@ -142,10 +166,12 @@ export function prepareRepositoryContext(data: GithubData) {
       ...contextPaths,
     ]),
   ];
+  const treeBudget = maxTreeCharacters();
+  const readmeBudget = maxReadmeCharacters();
   const paths: string[] = [];
   let characters = 0;
   for (const path of ordered) {
-    if (characters + path.length + 1 > MAX_TREE_CHARACTERS) continue;
+    if (characters + path.length + 1 > treeBudget) continue;
     paths.push(path);
     characters += path.length + 1;
   }
@@ -153,8 +179,8 @@ export function prepareRepositoryContext(data: GithubData) {
     selectedPaths,
     fileTree: paths.sort().join("\n"),
     readme:
-      data.readme.length > MAX_README_CHARACTERS
-        ? `${data.readme.slice(0, MAX_README_CHARACTERS)}\n[README excerpt ends here.]`
+      data.readme.length > readmeBudget
+        ? `${data.readme.slice(0, readmeBudget)}\n[README excerpt ends here.]`
         : data.readme,
     treeTruncated: paths.length < allPaths.length,
   };

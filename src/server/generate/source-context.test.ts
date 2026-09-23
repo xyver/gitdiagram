@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GithubData } from "./github";
 import { fetchSourceContext } from "./source-context";
 import {
-  MAX_SOURCE_CHARACTERS,
+  maxSourceCharacters,
   MAX_SOURCE_FILE_BYTES,
 } from "./repository-context";
 vi.mock("../github-auth", () => ({
@@ -111,7 +111,7 @@ describe("bounded source ingestion", () => {
       selectedPaths: paths,
     });
     expect(result.paths).toHaveLength(12);
-    expect(result.text.length).toBeLessThanOrEqual(MAX_SOURCE_CHARACTERS);
+    expect(result.text.length).toBeLessThanOrEqual(maxSourceCharacters());
     expect(result.text).toContain("gaps omitted");
     vi.stubGlobal(
       "fetch",

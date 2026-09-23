@@ -1,7 +1,7 @@
 import {
   prepareRepositoryContext,
   selectAnalysisModel,
-  MAX_SOURCE_CHARACTERS,
+  maxSourceCharacters,
 } from "~/server/generate/repository-context";
 import { estimateTokens } from "~/server/generate/openai";
 import { randomUUID } from "node:crypto";
@@ -153,7 +153,7 @@ export async function POST(request: Request) {
       model,
       analysisModel,
       sourceTokenReserve: context.selectedPaths.length
-        ? estimateTokens("x".repeat(MAX_SOURCE_CHARACTERS))
+        ? estimateTokens("x".repeat(maxSourceCharacters()))
         : 0,
       fileTree: context.fileTree,
       readme: context.readme,

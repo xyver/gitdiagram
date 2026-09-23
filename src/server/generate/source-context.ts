@@ -3,13 +3,14 @@ import { excerptSource } from "./source-excerpt";
 import { getGitHubApiHeaders } from "../github-auth";
 import type { GithubData, SourceBlob } from "./github";
 import {
-  MAX_SOURCE_CHARACTERS,
+  maxSourceCharacters,
   MAX_SOURCE_FILE_BYTES,
-  MAX_SOURCE_FILES,
+  maxSourceFileCharacters,
+  maxSourceFiles,
   isArchitectureSource,
 } from "./repository-context";
 
-interface SourceExcerpt {
+export interface SourceExcerpt {
   path: string;
   text: string;
   truncated: boolean;
@@ -141,7 +142,7 @@ export async function fetchSourceContext(params: {
     );
   const paths = params.selectedPaths
     .filter(isArchitectureSource)
-    .slice(0, MAX_SOURCE_FILES);
+    .slice(0, maxSourceFiles());
   const result: Array<SourceExcerpt | null> = paths.map(() => null);
   // Best-effort enrichment gets its own short budget, but caller cancellation
   // always propagates. Never cache source bodies or follow repository URLs.
@@ -219,24 +220,36 @@ export async function fetchSourceContext(params: {
   const available = result.filter(
     (entry): entry is SourceExcerpt => entry !== null,
   );
-  // Fair excerpts preserve coverage of every selected subsystem, not just the
-  // first long file. Clearly mark omitted bodies; absence never proves no edge.
+  return assembleSourceContext(available, paths.length);
+}
+
+/**
+ * Fair excerpts preserve coverage of every selected subsystem, not just the
+ * first long file. Clearly mark omitted bodies; absence never proves no edge.
+ *
+ * Shared by the GitHub reader and the local-filesystem reader so both produce
+ * an identical prompt payload.
+ */
+export function assembleSourceContext(
+  available: SourceExcerpt[],
+  requestedCount: number,
+): SourceContext {
   const limits = available.map(() => 0);
-  let remaining = MAX_SOURCE_CHARACTERS - 4000;
+  const budget = maxSourceCharacters();
+  const perFile = maxSourceFileCharacters();
+  let remaining = budget - 4000;
   let pending = available.map((_, index) => index);
+  const ceiling = (index: number) =>
+    Math.min(available[index]!.text.length, perFile);
   while (pending.length && remaining > 0) {
     const share = Math.floor(remaining / pending.length);
     if (!share) break;
     const next: number[] = [];
     for (const index of pending) {
-      const allocation = Math.min(
-        share,
-        Math.min(available[index]!.text.length, 10_000) - limits[index]!,
-      );
+      const allocation = Math.min(share, ceiling(index) - limits[index]!);
       limits[index]! += allocation;
       remaining -= allocation;
-      if (limits[index]! < Math.min(available[index]!.text.length, 10_000))
-        next.push(index);
+      if (limits[index]! < ceiling(index)) next.push(index);
     }
     pending = next;
   }
@@ -248,9 +261,9 @@ export async function fetchSourceContext(params: {
   });
   return {
     text: excerpts.length
-      ? excerpts.join("\n\n").slice(0, MAX_SOURCE_CHARACTERS)
+      ? excerpts.join("\n\n").slice(0, budget)
       : "No source excerpts available. Use documented relationships only.",
     paths: available.map((entry) => entry.path),
-    unavailableCount: paths.length - available.length,
+    unavailableCount: requestedCount - available.length,
   };
 }
