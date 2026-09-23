@@ -45,7 +45,27 @@ function getOpenRouterHeaders(): Record<string, string> {
   return headers;
 }
 
+/**
+ * Any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, LiteLLM proxy).
+ * When set it overrides the provider's own base URL.
+ */
+export function getCustomBaseUrl(): string | undefined {
+  const value = process.env.OPENAI_BASE_URL?.trim();
+  return value ? value : undefined;
+}
+
 function createClient(provider: AIProvider, apiKey: string): OpenAI {
+  const customBaseUrl = getCustomBaseUrl();
+
+  if (customBaseUrl) {
+    return new OpenAI({
+      apiKey,
+      baseURL: customBaseUrl,
+      maxRetries: AI_MAX_RETRIES,
+      timeout: AI_REQUEST_TIMEOUT_MS,
+    });
+  }
+
   if (provider === "openrouter") {
     return new OpenAI({
       apiKey,
@@ -85,6 +105,9 @@ function buildRequestOptions(params: {
 
 function resolveApiKey(provider: AIProvider, overrideApiKey?: string): string {
   const apiKey = overrideApiKey?.trim() || getEnvApiKey(provider);
+  // Local servers (Ollama, LM Studio, vLLM) ignore the key but the SDK
+  // still requires a non-empty string.
+  if (!apiKey && getCustomBaseUrl()) return "local";
   if (!apiKey) {
     const envVarName =
       provider === "openrouter" ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY";
